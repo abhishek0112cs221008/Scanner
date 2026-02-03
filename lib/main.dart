@@ -8,7 +8,8 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:image_picker/image_picker.dart';
 import 'widgets/scanner_overlay.dart';
-import 'models/scan_result.dart';
+
+// import 'models/scan_result.dart'; // Removed history model
 
 void main() {
   runApp(const ScannerApp());
@@ -20,13 +21,13 @@ class ScannerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'QuickScanner',
+      title: 'Scanner',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
         useMaterial3: true,
         colorSchemeSeed: Colors.blueAccent,
         brightness: Brightness.dark,
-        fontFamily: 'SF Pro Display', // Apple's font (fits the theme)
+        fontFamily: 'SF Pro Display',
       ),
       home: const ScannerScreen(),
     );
@@ -41,18 +42,34 @@ class ScannerScreen extends StatefulWidget {
 }
 
 class _ScannerScreenState extends State<ScannerScreen>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   final MobileScannerController controller = MobileScannerController(
-    detectionSpeed: DetectionSpeed.noDuplicates,
+    detectionSpeed: DetectionSpeed.normal, // Faster detection
+    formats: [BarcodeFormat.qrCode], // Optimize for QR mainly, or keep default
+    returnImage: false, // Don't process image data for speed
     facing: CameraFacing.back,
     torchEnabled: false,
     autoStart: true,
   );
 
+  late AnimationController _settingsSheetController;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _settingsSheetController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 200),
+    );
+    _checkPermission();
+  }
+
   bool isScanned = false;
   double _baseZoomScale = 0.0;
   bool enableVibration = true;
   bool enableSound = true;
+  bool _isSwitching = false;
 
   OverlayEntry? _currentOverlay;
 
@@ -72,24 +89,25 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 
   @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _checkPermission();
-  }
-
-  @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!controller.value.isInitialized) return;
 
     switch (state) {
       case AppLifecycleState.resumed:
-        controller.start();
+        try {
+          controller.start();
+        } catch (e) {
+          debugPrint('Lifecycle resume error: $e');
+        }
         break;
       case AppLifecycleState.inactive:
       case AppLifecycleState.paused:
       case AppLifecycleState.detached:
-        controller.stop();
+        try {
+          controller.stop();
+        } catch (e) {
+          debugPrint('Lifecycle pause error: $e');
+        }
         break;
       case AppLifecycleState.hidden:
         break;
@@ -117,6 +135,7 @@ class _ScannerScreenState extends State<ScannerScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     controller.dispose();
+    _settingsSheetController.dispose();
     super.dispose();
   }
 
@@ -152,11 +171,12 @@ class _ScannerScreenState extends State<ScannerScreen>
 
     // Stop detection immediately to prevent duplicate sheets
     // We stay active but stop the engine processing
-    try {
-      await controller.stop();
-    } catch (e) {
-      debugPrint('Error stopping controller: $e');
-    }
+    // OPTIMIZATION: Do NOT stop the controller. Keeping it running makes next scan instant.
+    // try {
+    //   await controller.stop();
+    // } catch (e) {
+    //   debugPrint('Error stopping controller: $e');
+    // }
 
     if (enableSound) {
       SystemSound.play(SystemSoundType.click);
@@ -171,11 +191,11 @@ class _ScannerScreenState extends State<ScannerScreen>
 
     final bool isUrl = _isUrl(code);
 
-    // Add to history
-    scanHistory.insert(
-      0,
-      ScanResult(code: code, timestamp: DateTime.now(), isUrl: isUrl),
-    );
+    // History removed
+    // scanHistory.insert(
+    //   0,
+    //   ScanResult(code: code, timestamp: DateTime.now(), isUrl: isUrl),
+    // );
 
     if (mounted) {
       _showResultSheet(code, isUrl);
@@ -344,14 +364,18 @@ class _ScannerScreenState extends State<ScannerScreen>
 
       // Restart the camera engine to clear its internal barcode cache
       // This is the key to 'same QR' scanning quickly
-      try {
-        if (mounted) {
-          await controller.start();
-          HapticFeedback.lightImpact(); // Subtle confirmation
-        }
-      } catch (e) {
-        debugPrint('Error starting controller: $e');
-      }
+      // Restart the camera engine to clear its internal barcode cache
+      // This is the key to 'same QR' scanning quickly
+      // OPTIMIZATION: Controller was never stopped, so no need to restart.
+      // Just clearing the flag is enough.
+      // try {
+      //   if (mounted) {
+      //     await controller.start();
+      //     HapticFeedback.lightImpact(); // Subtle confirmation
+      //   }
+      // } catch (e) {
+      //   debugPrint('Error starting controller: $e');
+      // }
 
       if (mounted) {
         setState(() {
@@ -364,12 +388,13 @@ class _ScannerScreenState extends State<ScannerScreen>
   void _showSettingsDialog() {
     showModalBottomSheet(
       context: context,
+      transitionAnimationController: _settingsSheetController,
       backgroundColor: Colors.transparent,
       builder: (context) => StatefulBuilder(
         builder: (context, setDialogState) => ClipRRect(
           borderRadius: const BorderRadius.vertical(top: Radius.circular(32)),
           child: BackdropFilter(
-            filter: ImageFilter.blur(sigmaX: 20, sigmaY: 20),
+            filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10), // Optimized blur
             child: Container(
               padding: const EdgeInsets.fromLTRB(24, 12, 24, 40),
               decoration: BoxDecoration(
@@ -585,16 +610,19 @@ class _ScannerScreenState extends State<ScannerScreen>
             child: Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                // History Button
+                // Flip Camera Button
                 GestureDetector(
-                  onTap: () {
+                  onTap: () async {
+                    if (_isSwitching) return;
+                    _isSwitching = true;
                     HapticFeedback.lightImpact();
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => const HistoryScreen(),
-                      ),
-                    );
+                    try {
+                      await controller.switchCamera();
+                    } catch (e) {
+                      debugPrint('Error switching camera: $e');
+                    } finally {
+                      _isSwitching = false;
+                    }
                   },
                   child: Container(
                     padding: const EdgeInsets.all(10),
@@ -604,7 +632,7 @@ class _ScannerScreenState extends State<ScannerScreen>
                       border: Border.all(color: Colors.white24),
                     ),
                     child: const Icon(
-                      Icons.history_rounded,
+                      Icons.cameraswitch_rounded,
                       color: Colors.white,
                       size: 24,
                     ),
@@ -741,444 +769,7 @@ class _ScannerScreenState extends State<ScannerScreen>
   }
 }
 
-class HistoryScreen extends StatefulWidget {
-  const HistoryScreen({super.key});
-
-  @override
-  State<HistoryScreen> createState() => _HistoryScreenState();
-}
-
-class _HistoryScreenState extends State<HistoryScreen> {
-  void _showResultDetails(ScanResult result) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => ClipRRect(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(30)),
-        child: BackdropFilter(
-          filter: ImageFilter.blur(sigmaX: 15, sigmaY: 15),
-          child: Container(
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: const Color(0xFF1E1E1E).withOpacity(0.85),
-              borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(30),
-              ),
-              border: Border.all(color: Colors.white10),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 40,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: 20),
-                  decoration: BoxDecoration(
-                    color: Colors.white24,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                Icon(
-                  result.isUrl ? Icons.link_rounded : Icons.qr_code_2_rounded,
-                  color: Colors.blueAccent,
-                  size: 64,
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  result.isUrl ? 'Saved Link' : 'Saved Result',
-                  style: const TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                Container(
-                  padding: const EdgeInsets.all(18),
-                  width: double.infinity,
-                  decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.05),
-                    borderRadius: BorderRadius.circular(15),
-                    border: Border.all(color: Colors.white10),
-                  ),
-                  child: SelectableText(
-                    result.code,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(color: Colors.white70, fontSize: 16),
-                  ),
-                ),
-                const SizedBox(height: 24),
-                Row(
-                  children: [
-                    if (result.isUrl) ...[
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: () async {
-                            String urlString = result.code.trim();
-                            if (!urlString.startsWith('http://') &&
-                                !urlString.startsWith('https://')) {
-                              urlString = 'https://$urlString';
-                            }
-                            final url = Uri.tryParse(urlString);
-                            if (url != null) {
-                              try {
-                                await launchUrl(
-                                  url,
-                                  mode: LaunchMode.externalApplication,
-                                );
-                              } catch (e) {}
-                            }
-                          },
-                          icon: const Icon(Icons.open_in_new_rounded),
-                          label: const Text('Open'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.blueAccent,
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(vertical: 16),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                    ],
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: () {
-                          Clipboard.setData(ClipboardData(text: result.code));
-                          Navigator.pop(context);
-                          // We need a way to show notification which is currently in ScannerScreenState
-                          // For now using simple snackbar or just pop
-                        },
-                        icon: const Icon(Icons.copy_rounded, size: 18),
-                        label: const Text('Copy'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.white10,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: () {
-                          setState(() {
-                            scanHistory.remove(result);
-                          });
-                          Navigator.pop(context);
-                        },
-                        icon: const Icon(
-                          Icons.delete_outline_rounded,
-                          size: 18,
-                        ),
-                        label: const Text('Delete'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.redAccent.withOpacity(0.1),
-                          foregroundColor: Colors.redAccent,
-                          elevation: 0,
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                            side: const BorderSide(
-                              color: Colors.redAccent,
-                              width: 0.5,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: OutlinedButton(
-                        onPressed: () {
-                          Navigator.pop(context);
-                        },
-                        style: OutlinedButton.styleFrom(
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          side: const BorderSide(color: Colors.white24),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        child: const Text(
-                          'Close',
-                          style: TextStyle(color: Colors.white70),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 20),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // Group history by date
-    Map<String, List<ScanResult>> groupedHistory = {};
-    for (var result in scanHistory) {
-      String dateLabel = _formatDate(result.timestamp);
-      if (!groupedHistory.containsKey(dateLabel)) {
-        groupedHistory[dateLabel] = [];
-      }
-      groupedHistory[dateLabel]!.add(result);
-    }
-
-    final dateKeys = groupedHistory.keys.toList();
-
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black,
-        elevation: 0,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back_ios_new_rounded),
-          onPressed: () => Navigator.pop(context),
-        ),
-        title: const Text(
-          'History',
-          style: TextStyle(
-            fontWeight: FontWeight.bold,
-            fontSize: 22,
-            letterSpacing: -1,
-          ),
-        ),
-        centerTitle: true,
-        actions: [
-          if (scanHistory.isNotEmpty)
-            IconButton(
-              icon: const Icon(
-                Icons.delete_sweep_rounded,
-                color: Colors.redAccent,
-              ),
-              onPressed: () {
-                showDialog(
-                  context: context,
-                  builder: (context) => AlertDialog(
-                    backgroundColor: const Color(0xFF1E1E1E),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    title: const Text('Clear History?'),
-                    content: const Text(
-                      'This will delete all your scan history permanently.',
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(context),
-                        child: const Text(
-                          'Cancel',
-                          style: TextStyle(color: Colors.white70),
-                        ),
-                      ),
-                      TextButton(
-                        onPressed: () {
-                          setState(() {
-                            scanHistory.clear();
-                          });
-                          Navigator.pop(context);
-                        },
-                        child: const Text(
-                          'Clear All',
-                          style: TextStyle(color: Colors.redAccent),
-                        ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            ),
-          const SizedBox(width: 8),
-        ],
-      ),
-      body: scanHistory.isEmpty
-          ? Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(40),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withOpacity(0.03),
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      Icons.history_rounded,
-                      size: 100,
-                      color: Colors.white.withOpacity(0.1),
-                    ),
-                  ),
-                  const SizedBox(height: 32),
-                  const Text(
-                    'Your scans will appear here',
-                    style: TextStyle(
-                      color: Colors.white38,
-                      fontSize: 16,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-              ),
-            )
-          : ListView.builder(
-              padding: const EdgeInsets.fromLTRB(20, 10, 20, 30),
-              itemCount: dateKeys.length,
-              itemBuilder: (context, sectionIndex) {
-                String dateLabel = dateKeys[sectionIndex];
-                List<ScanResult> items = groupedHistory[dateLabel]!;
-
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(
-                        left: 4,
-                        bottom: 12,
-                        top: 12,
-                      ),
-                      child: Text(
-                        dateLabel.toUpperCase(),
-                        style: const TextStyle(
-                          color: Colors.white24,
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 1.2,
-                        ),
-                      ),
-                    ),
-                    ...items.map(
-                      (result) => Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: Dismissible(
-                          key: Key(result.timestamp.toString() + result.code),
-                          direction: DismissDirection.endToStart,
-                          onDismissed: (direction) {
-                            setState(() {
-                              scanHistory.remove(result);
-                            });
-                          },
-                          background: Container(
-                            alignment: Alignment.centerRight,
-                            padding: const EdgeInsets.only(right: 20),
-                            decoration: BoxDecoration(
-                              color: Colors.redAccent.withOpacity(0.2),
-                              borderRadius: BorderRadius.circular(22),
-                            ),
-                            child: const Icon(
-                              Icons.delete_outline_rounded,
-                              color: Colors.redAccent,
-                            ),
-                          ),
-                          child: InkWell(
-                            onTap: () => _showResultDetails(result),
-                            borderRadius: BorderRadius.circular(22),
-                            child: Container(
-                              padding: const EdgeInsets.all(16),
-                              decoration: BoxDecoration(
-                                color: Colors.white.withOpacity(0.04),
-                                borderRadius: BorderRadius.circular(22),
-                                border: Border.all(
-                                  color: Colors.white.withOpacity(0.06),
-                                ),
-                              ),
-                              child: Row(
-                                children: [
-                                  Container(
-                                    padding: const EdgeInsets.all(12),
-                                    decoration: BoxDecoration(
-                                      color: result.isUrl
-                                          ? Colors.blueAccent.withOpacity(0.1)
-                                          : Colors.greenAccent.withOpacity(0.1),
-                                      borderRadius: BorderRadius.circular(16),
-                                    ),
-                                    child: Icon(
-                                      result.isUrl
-                                          ? Icons.link_rounded
-                                          : Icons.qr_code_2_rounded,
-                                      color: result.isUrl
-                                          ? Colors.blueAccent
-                                          : Colors.greenAccent,
-                                      size: 24,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 16),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Text(
-                                          result.code,
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontWeight: FontWeight.w600,
-                                            fontSize: 16,
-                                            letterSpacing: -0.3,
-                                          ),
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                        const SizedBox(height: 4),
-                                        Text(
-                                          _formatTime(result.timestamp),
-                                          style: const TextStyle(
-                                            color: Colors.white24,
-                                            fontSize: 13,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  const Icon(
-                                    Icons.arrow_forward_ios_rounded,
-                                    size: 12,
-                                    color: Colors.white12,
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                );
-              },
-            ),
-    );
-  }
-
-  String _formatDate(DateTime date) {
-    final now = DateTime.now();
-    if (date.day == now.day &&
-        date.month == now.month &&
-        date.year == now.year) {
-      return 'Today';
-    }
-    final yesterday = now.subtract(const Duration(days: 1));
-    if (date.day == yesterday.day &&
-        date.month == yesterday.month &&
-        date.year == yesterday.year) {
-      return 'Yesterday';
-    }
-    return '${date.day}/${date.month}';
-  }
-
-  String _formatTime(DateTime date) {
-    return '${date.hour.toString().padLeft(2, '0')}:${date.minute.toString().padLeft(2, '0')}';
-  }
-}
+// HistoryScreen removed along with helper methods
 
 class _TopNotification extends StatefulWidget {
   final String message;

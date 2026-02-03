@@ -1,4 +1,4 @@
-package com.example.scanner
+package com.abhishek.quickscanner
 
 import io.flutter.embedding.android.FlutterActivity
 
